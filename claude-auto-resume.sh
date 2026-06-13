@@ -17,6 +17,8 @@ CUSTOM_COMMAND=""
 TEST_MODE=false
 TEST_WAIT_SECONDS=0
 TEST_MESSAGE_TYPE="old"  # "old" for timestamp format, "new" for time format
+CLAUDE_PID=""
+TIMEOUT_WATCHER_PID=""
 
 # Cleanup function for graceful termination
 cleanup_on_exit() {
@@ -59,16 +61,17 @@ cleanup_resources() {
     # Kill any background processes if they exist
     if [ -n "$CLAUDE_PID" ]; then
         echo "[INFO] Terminating Claude CLI process (PID: $CLAUDE_PID)..."
-        kill $CLAUDE_PID 2>/dev/null
+        kill "$CLAUDE_PID" 2>/dev/null
         # Wait a bit for graceful termination
         sleep 1
         # Force kill if still running
-        kill -9 $CLAUDE_PID 2>/dev/null
+        kill -9 "$CLAUDE_PID" 2>/dev/null
     fi
     
-    # Kill any other potential background processes started by this script
-    # Check for any timeout processes that might be lingering
-    pkill -f "timeout.*claude" 2>/dev/null
+    # Kill timeout watcher process if it exists
+    if [ -n "$TIMEOUT_WATCHER_PID" ]; then
+        kill "$TIMEOUT_WATCHER_PID" 2>/dev/null
+    fi
     
     # Kill any background processes from custom commands
     # This is a placeholder - specific cleanup would depend on the commands being run
@@ -80,6 +83,7 @@ cleanup_resources() {
     
     # Reset variables
     CLAUDE_PID=""
+    TIMEOUT_WATCHER_PID=""
     
     # Mark cleanup as done
     CLEANUP_DONE=true
@@ -103,17 +107,35 @@ portable_timeout() {
         # macOS/BSD fallback: run command in background with watchdog
         "$@" &
         local pid=$!
-        ( sleep "$seconds" && kill "$pid" 2>/dev/null ) &
+        local timeout_marker
+        timeout_marker=$(mktemp)
+        CLAUDE_PID="$pid"
+        (
+            sleep "$seconds"
+            echo "timed_out" > "$timeout_marker"
+            kill "$pid" 2>/dev/null
+        ) &
         local watcher=$!
-        wait "$pid" 2>/dev/null
+        TIMEOUT_WATCHER_PID="$watcher"
+        wait "$pid"
         local ret=$?
         kill "$watcher" 2>/dev/null
         wait "$watcher" 2>/dev/null 2>&1
-        # Killed by signal means timeout occurred
-        if [ $ret -ge 128 ]; then
+        TIMEOUT_WATCHER_PID=""
+        CLAUDE_PID=""
+        if [ -s "$timeout_marker" ]; then
+            rm -f "$timeout_marker"
             return 124
         fi
+        rm -f "$timeout_marker"
         return $ret
+    fi
+}
+
+abort_if_interrupted() {
+    local exit_code="$1"
+    if [ "$exit_code" -eq 130 ] || [ "$exit_code" -eq 143 ]; then
+        interrupt_handler
     fi
 }
 
@@ -140,6 +162,7 @@ execute_custom_command() {
     # Use eval to support complex commands with pipes and redirections
     eval "$command"
     local exit_code=$?
+    abort_if_interrupted "$exit_code"
     
     local end_time=$(date +%s)
     local duration=$((end_time - start_time))
@@ -538,6 +561,7 @@ if [ "$EXECUTE_MODE" = true ]; then
         CLAUDE_PID=""
         CLAUDE_OUTPUT=$(portable_timeout 300 claude -p 'check' 2>&1)
         RET_CODE=$?
+        abort_if_interrupted "$RET_CODE"
         CLAUDE_PID=""
     else
         echo "[WARNING] Claude CLI not found. Skipping usage limit check in execute mode."
@@ -550,6 +574,7 @@ else
     CLAUDE_PID=""
     CLAUDE_OUTPUT=$(portable_timeout 300 claude -p 'check' 2>&1)
     RET_CODE=$?
+    abort_if_interrupted "$RET_CODE"
     CLAUDE_PID=""
 fi
 
@@ -689,12 +714,14 @@ if [ -n "$LIMIT_MSG" ]; then
       CLAUDE_PID=""
       CLAUDE_OUTPUT2=$(claude -c --dangerously-skip-permissions -p "$CUSTOM_PROMPT" 2>&1)
       RET_CODE2=$?
+      abort_if_interrupted "$RET_CODE2"
       CLAUDE_PID=""
     else
       echo "Automatically starting new Claude session with prompt: '$CUSTOM_PROMPT'"
       CLAUDE_PID=""
       CLAUDE_OUTPUT2=$(claude --dangerously-skip-permissions -p "$CUSTOM_PROMPT" 2>&1)
       RET_CODE2=$?
+      abort_if_interrupted "$RET_CODE2"
       CLAUDE_PID=""
     fi
     

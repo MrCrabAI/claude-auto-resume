@@ -2,7 +2,7 @@ PREFIX ?= /usr/local
 BINDIR = $(PREFIX)/bin
 SCRIPT_NAME = claude-auto-resume
 
-.PHONY: install uninstall test
+.PHONY: install uninstall test test-interrupt
 
 install:
 	@echo "Installing $(SCRIPT_NAME) to $(BINDIR)..."
@@ -19,7 +19,15 @@ uninstall:
 test:
 	@echo "Testing script syntax..."
 	@bash -n claude-auto-resume.sh
-	@echo "Syntax check passed."
+	@echo "Running Ctrl+C interrupt test..."
+	@chmod +x test_interrupt_ctrl_c.sh
+	@./test_interrupt_ctrl_c.sh
+	@echo "All tests passed."
+
+test-interrupt:
+	@echo "Running Ctrl+C interrupt test..."
+	@chmod +x test_interrupt_ctrl_c.sh
+	@./test_interrupt_ctrl_c.sh
 
 help:
 	@echo "Available targets:"
